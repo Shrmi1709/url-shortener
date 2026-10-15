@@ -2,11 +2,12 @@ require('dotenv').config();
 const express = require('express');
 const connectDB = require('./config/db');
 const { shortenUrl, redirectUrl } = require('./controllers/urlController');
+const rateLimiter = require('./middleware/rateLimiter');
 
 const app = express();
 app.use(express.json());
 
-// Logs how long every request took, so you can compare cache HIT vs MISS
+
 app.use((req, res, next) => {
   const start = process.hrtime.bigint();
   res.on('finish', () => {
@@ -16,10 +17,12 @@ app.use((req, res, next) => {
   next();
 });
 
-// API routes first, then the catch-all /:code route
+const shortenLimiter = rateLimiter({ name: 'shorten', limit: 10, windowMs: 60 * 1000 });
+const redirectLimiter = rateLimiter({ name: 'redirect', limit: 100, windowMs: 60 * 1000 });
+
 app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
-app.post('/api/shorten', shortenUrl);
-app.get('/:code', redirectUrl);
+app.post('/api/shorten', shortenLimiter, shortenUrl);
+app.get('/:code', redirectLimiter, redirectUrl);
 
 app.use((err, req, res, next) => {
   console.error(err);
