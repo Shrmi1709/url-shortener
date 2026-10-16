@@ -2,14 +2,20 @@ const Url = require('../models/Url');
 const { getNextSequence } = require('../models/Counter');
 const { encode } = require('../utils/base62');
 const redis = require('../config/redis');
+const metrics = require('../utils/metrics');
 
-// Offset so codes start at 5 characters instead of "1", "2", "3"...
+
 const ID_OFFSET = 100_000_000;
 const CACHE_TTL_SECONDS = 60 * 60 * 24; // keep a link in cache for 24 hours
 const cacheKey = (code) => `url:${code}`;
 
-// If Redis is down, these return null / do nothing, and the app falls back to MongoDB.
+
+const CACHE_ENABLED = process.env.CACHE_ENABLED !== 'false';
+const REQUEST_LOGS = process.env.REQUEST_LOGS !== 'false';
+
+
 async function cacheGet(key) {
+  if (!CACHE_ENABLED) return null;
   try {
     return await redis.get(key);
   } catch (err) {
@@ -19,6 +25,7 @@ async function cacheGet(key) {
 }
 
 async function cacheSet(key, value) {
+  if (!CACHE_ENABLED) return;
   try {
     await redis.set(key, value, 'EX', CACHE_TTL_SECONDS);
   } catch (err) {
@@ -39,7 +46,7 @@ function isValidUrl(value) {
   }
 }
 
-// POST /api/shorten   body: { "url": "https://..." }
+
 async function shortenUrl(req, res, next) {
   try {
     const { url } = req.body;
@@ -63,33 +70,39 @@ async function shortenUrl(req, res, next) {
   }
 }
 
-// GET /:code  -> redirects to the original URL (cache-aside pattern)
+
 async function redirectUrl(req, res, next) {
+  const start = process.hrtime.bigint();
+  const elapsedMs = () => Number(process.hrtime.bigint() - start) / 1e6;
+
   try {
     const { code } = req.params;
 
-    // 1. Try Redis first
+    
     const cached = await cacheGet(cacheKey(code));
     if (cached) {
-      console.log(`[cache HIT]  ${code}`);
+      if (REQUEST_LOGS) console.log(`[cache HIT]  ${code}`);
       res.set('X-Cache', 'HIT');
       countClick(code);
-      return res.redirect(302, cached);
+      res.redirect(302, cached);
+      metrics.record('redirect_cache_hit', elapsedMs());
+      return;
     }
 
-    // 2. Cache miss: go to MongoDB
+    
     const doc = await Url.findOne({ shortCode: code });
     if (!doc) return res.status(404).json({ error: 'Short URL not found' });
 
-    // 3. Save in Redis so the next request is fast
+    
     await cacheSet(cacheKey(code), doc.originalUrl);
 
-    console.log(`[cache MISS] ${code}`);
-    res.set('X-Cache', 'MISS');
+    if (REQUEST_LOGS) console.log(`[cache MISS] ${code}`);
+    res.set('X-Cache', CACHE_ENABLED ? 'MISS' : 'DISABLED');
     countClick(code);
 
-    // 302 (not 301): browsers cache 301, so later clicks would never reach us.
+    
     res.redirect(302, doc.originalUrl);
+    metrics.record(CACHE_ENABLED ? 'redirect_cache_miss' : 'redirect_db_only', elapsedMs());
   } catch (err) {
     next(err);
   }
