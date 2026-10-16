@@ -12,6 +12,8 @@ const REQUEST_LOGS = process.env.REQUEST_LOGS !== 'false';
 
 const app = express();
 app.use(express.json());
+  
+   app.use(express.static(require('path').join(__dirname, '..', 'public')));
 
 
 if (REQUEST_LOGS) {
